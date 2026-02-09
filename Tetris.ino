@@ -8,8 +8,11 @@
 #define TFT_RST 17
 
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
+
+// Color definitions
 #define ST77XX_DARKGREY 0x7BEF
 #define ST77XX_LIGHTGREY 0xC618
+#define ST77XX_ORANGE 0xFD20
 #define NEON_CYAN   ST77XX_CYAN
 #define NEON_PINK   ST77XX_MAGENTA
 #define NEON_DARK   0x1082  
@@ -37,7 +40,6 @@ enum PieceType {
   PIECE_L
 };
 
-
 const int BOARD_W = 10;
 const int BOARD_H = 20;
 
@@ -47,6 +49,7 @@ int pieceX = 3;
 int pieceY = 0;
 
 byte piece[4][4];
+byte prevPiece[4][4];
 
 const byte tetrominoes[7][4][4] = {
   // I
@@ -116,11 +119,11 @@ int nextPiece = PIECE_I;
 
 unsigned long lastFall = 0;
 const unsigned long fallInterval = 500; // ms
-
-const unsigned long fastFall   = 50;
+const unsigned long fastFall = 50;
 
 int prevPieceX = pieceX;
 int prevPieceY = pieceY;
+int prevGhostY = -1;
 
 unsigned long lastMove = 0;
 const unsigned long moveDelay = 150;
@@ -140,18 +143,26 @@ bool gameOver = false;
 
 const int HOLD_W = 4 * CELL_SIZE + 4;
 
-const int PREVIEW_X =
-  BOARD_OFFSET_X
-  + BOARD_W * CELL_SIZE
-  + SIDE_GUTTER;
+const int PREVIEW_X = BOARD_OFFSET_X + BOARD_W * CELL_SIZE + SIDE_GUTTER;
 const int PREVIEW_Y = 40;
 
 int holdPiece = PIECE_NONE;
 bool holdUsed = false;
 
 const int HOLD_X = max(2, BOARD_OFFSET_X - SIDE_GUTTER - HOLD_W);
-
 const int HOLD_Y = 40;
+
+long lastScore = -1;
+int lastLevel = -1;
+
+int lastNextPiece = -1;
+int lastHoldPiece = -1;
+
+// Debouncing variables
+bool btnLeftPressed = false;
+bool btnRightPressed = false;
+bool btnRotatePressed = false;
+bool btnStartPressed = false;
 
 void setup() {
   Serial.begin(115200);
@@ -165,84 +176,123 @@ void setup() {
   tft.initR(INITR_BLACKTAB);
   tft.setRotation(2);
   tft.fillScreen(ST77XX_BLACK);
+  
   drawBorder();
   drawCyberGrid();
 
   tft.setTextColor(ST77XX_WHITE);
   tft.setTextSize(1);
   tft.setCursor(5, 5);
-  tft.print("ESP32 Tetris Test");
+  tft.print("ESP32 Tetris");
 
   for (int y = 0; y < BOARD_H; y++) {
     for (int x = 0; x < BOARD_W; x++) {
       board[y][x] = 0;
     }
   }
+  
   randomSeed(analogRead(0));
   nextPiece = random(1, 8);
   spawnPiece();
-
+  
+  delay(1000);
+  tft.fillRect(0, 0, 128, 26, ST77XX_BLACK);
+  drawHUD();
+  drawNextPiece();
+  drawHoldPiece();
 }
 
 void loop() {
+  static bool needsRedraw = true;
 
+  // ---------------- GAME OVER ----------------
   if (gameOver) {
     drawGameOverScreen();
 
-    static bool startReleased = true;
-
-    if (digitalRead(BTN_START)) startReleased = true;
-
-    if (!digitalRead(BTN_START) && startReleased) {
-      resetGame();
-      startReleased = false;
+    bool startPressed = !digitalRead(BTN_START);
+    
+    if (!startPressed) {
+      btnStartPressed = false;
     }
 
+    if (startPressed && !btnStartPressed) {
+      btnStartPressed = true;
+      resetGame();
+      needsRedraw = true;
+    }
     return;
   }
 
+  // Save previous position for selective erase
   prevPieceX = pieceX;
   prevPieceY = pieceY;
+  prevGhostY = getGhostY();
+  
+  // Save previous piece shape
+  for (int y = 0; y < 4; y++) {
+    for (int x = 0; x < 4; x++) {
+      prevPiece[y][x] = piece[y][x];
+    }
+  }
 
-  // ---------- ROTATION ----------
-  if (!digitalRead(BTN_ROTATE) && millis() - lastRotate > rotateDelay) {
+  // ---------------- ROTATION ----------------
+  bool rotatePressed = !digitalRead(BTN_ROTATE);
+  
+  if (!rotatePressed) {
+    btnRotatePressed = false;
+  }
+  
+  if (rotatePressed && !btnRotatePressed && millis() - lastRotate > rotateDelay) {
+    btnRotatePressed = true;
     rotatePiece();
     lastRotate = millis();
+    needsRedraw = true;
   }
 
-  // ---------- HORIZONTAL MOVEMENT ----------
+  // ---------------- HORIZONTAL MOVE ----------------
   if (millis() - lastMove > moveDelay) {
+    bool leftPressed = !digitalRead(BTN_LEFT);
+    bool rightPressed = !digitalRead(BTN_RIGHT);
 
-    if (!digitalRead(BTN_LEFT) && canMove(-1, 0)) {
+    if (!leftPressed) btnLeftPressed = false;
+    if (!rightPressed) btnRightPressed = false;
+
+    if (leftPressed && !btnLeftPressed && canMove(-1, 0)) {
+      btnLeftPressed = true;
       pieceX--;
       lastMove = millis();
+      needsRedraw = true;
     }
 
-    if (!digitalRead(BTN_RIGHT) && canMove(1, 0)) {
+    if (rightPressed && !btnRightPressed && canMove(1, 0)) {
+      btnRightPressed = true;
       pieceX++;
       lastMove = millis();
+      needsRedraw = true;
     }
   }
 
-  // ---------- SOFT DROP ----------
-  unsigned long currentFall =
-    (!digitalRead(BTN_DOWN)) ? fastFall : getNormalFall();
-
-    static bool holdReleased = true;
-
-  if (digitalRead(BTN_START)) holdReleased = true;
-
-  if (!digitalRead(BTN_START) && holdReleased) {
-    holdCurrentPiece();
-    holdReleased = false;
+  // ---------------- HOLD ----------------
+  bool startPressed = !digitalRead(BTN_START);
+  
+  if (!startPressed) {
+    btnStartPressed = false;
   }
 
+  if (startPressed && !btnStartPressed) {
+    btnStartPressed = true;
+    holdCurrentPiece();
+    needsRedraw = true;
+  }
 
-  // ---------- GRAVITY ----------
+  // ---------------- FALL SPEED ----------------
+  unsigned long currentFall = (!digitalRead(BTN_DOWN)) ? fastFall : getNormalFall();
+
+  // ---------------- GRAVITY ----------------
   if (millis() - lastFall > currentFall) {
-
     if (canMove(0, 1)) {
       pieceY++;
+      needsRedraw = true;
     } else {
       lockPiece();
       holdUsed = false;
@@ -260,54 +310,30 @@ void loop() {
       }
 
       redrawBoard();
-
-      // ---------- SPAWN & GAME OVER CHECK ----------
       spawnPiece();
+      needsRedraw = true;
+
       if (!canMove(0, 0)) {
         gameOver = true;
+        return;
       }
     }
 
     lastFall = millis();
   }
 
-  // ---------- RENDER ----------
-  drawGame();
-  drawHUD();
-  drawNextPiece();
-  drawHoldPiece();
-
-  delay(5);
+  // ---------------- RENDER (ONLY IF NEEDED) ----------------
+  if (needsRedraw) {
+    drawGame();
+    drawHUD();
+    drawNextPiece();
+    drawHoldPiece();
+    needsRedraw = false;
+  }
 }
 
 unsigned long getNormalFall() {
   return max(100UL, 500UL - (level - 1) * 40);
-}
-
-void drawGrid() {
-  int cell = 6;       
-  int offsetX = 30;    
-  int offsetY = 30;    
-
-  for (int x = 0; x <= 10; x++) {
-    tft.drawLine(
-      offsetX + x * cell,
-      offsetY,
-      offsetX + x * cell,
-      offsetY + 20 * cell,
-      ST77XX_DARKGREY
-    );
-  }
-
-  for (int y = 0; y <= 20; y++) {
-    tft.drawLine(
-      offsetX,
-      offsetY + y * cell,
-      offsetX + 10 * cell,
-      offsetY + y * cell,
-      ST77XX_DARKGREY
-    );
-  }
 }
 
 void drawBlock(int x, int y, uint16_t color) {
@@ -330,33 +356,56 @@ void drawBorder() {
 
   // Top
   tft.drawLine(x + gap, y, x + w - gap, y, NEON_CYAN);
-
   // Bottom
   tft.drawLine(x + gap, y + h, x + w - gap, y + h, NEON_CYAN);
-
   // Left
   tft.drawLine(x, y + gap, x, y + h - gap, NEON_CYAN);
-
   // Right
   tft.drawLine(x + w, y + gap, x + w, y + h - gap, NEON_CYAN);
 
+  // Corner accents
   tft.drawLine(x + gap - 6, y, x + gap - 2, y, NEON_PINK);
   tft.drawLine(x + w - gap + 2, y, x + w - gap + 6, y, NEON_PINK);
-
   tft.drawLine(x + gap - 6, y + h, x + gap - 2, y + h, NEON_PINK);
   tft.drawLine(x + w - gap + 2, y + h, x + w - gap + 6, y + h, NEON_PINK);
 }
 
-
-
 void drawGame() {
-
-  for (int y = 0; y < BOARD_H; y++) {
-    for (int x = 0; x < BOARD_W; x++) {
-      drawBlock(x, y, ST77XX_BLACK);
+  // Erase previous ghost piece
+  if (prevGhostY >= 0 && prevGhostY != prevPieceY) {
+    for (int py = 0; py < 4; py++) {
+      for (int px = 0; px < 4; px++) {
+        if (prevPiece[py][px]) {
+          int x = prevPieceX + px;
+          int y = prevGhostY + py;
+          if (y >= 0 && y < BOARD_H && x >= 0 && x < BOARD_W) {
+            // Only erase if there's no locked piece here
+            if (board[y][x] == 0) {
+              drawBlock(x, y, ST77XX_BLACK);
+            }
+          }
+        }
+      }
     }
   }
 
+  // Erase previous piece position
+  for (int py = 0; py < 4; py++) {
+    for (int px = 0; px < 4; px++) {
+      if (prevPiece[py][px]) {
+        int x = prevPieceX + px;
+        int y = prevPieceY + py;
+        if (y >= 0 && y < BOARD_H && x >= 0 && x < BOARD_W) {
+          // Only erase if there's no locked piece here
+          if (board[y][x] == 0) {
+            drawBlock(x, y, ST77XX_BLACK);
+          }
+        }
+      }
+    }
+  }
+
+  // Draw locked pieces
   for (int y = 0; y < BOARD_H; y++) {
     for (int x = 0; x < BOARD_W; x++) {
       if (board[y][x]) {
@@ -365,17 +414,20 @@ void drawGame() {
     }
   }
 
+  // Draw ghost piece
   drawGhostPiece();
 
+  // Draw current piece
   for (int py = 0; py < 4; py++) {
     for (int px = 0; px < 4; px++) {
       if (piece[py][px]) {
-        drawBlock(pieceX + px, pieceY + py,
-                  pieceColors[currentPiece]);
+        int y = pieceY + py;
+        if (y >= 0) {
+          drawBlock(pieceX + px, y, pieceColors[currentPiece]);
+        }
       }
     }
   }
-
 }
 
 bool canMove(int dx, int dy) {
@@ -387,15 +439,12 @@ bool canMove(int dx, int dy) {
       int newY = pieceY + py + dy;
 
       if (newY >= BOARD_H) return false;
-
       if (newX < 0 || newX >= BOARD_W) return false;
-
       if (newY >= 0 && board[newY][newX]) return false;
     }
   }
   return true;
 }
-
 
 void lockPiece() {
   for (int py = 0; py < 4; py++) {
@@ -403,14 +452,13 @@ void lockPiece() {
       if (piece[py][px]) {
         int bx = pieceX + px;
         int by = pieceY + py;
-        if (by >= 0 && by < BOARD_H) {
+        if (by >= 0 && by < BOARD_H && bx >= 0 && bx < BOARD_W) {
           board[by][bx] = currentPiece;
         }
       }
     }
   }
 }
-
 
 int clearLines() {
   int cleared = 0;
@@ -443,7 +491,7 @@ int clearLines() {
         board[0][col] = 0;
       }
 
-      y++; 
+      y++;
     }
   }
 
@@ -463,7 +511,6 @@ void spawnPiece() {
     }
   }
 }
-
 
 void rotatePiece() {
   byte temp[4][4];
@@ -506,16 +553,15 @@ void redrawBoard() {
   }
 }
 
-
 void drawHUD() {
+  if (score == lastScore && level == lastLevel) return;
 
-  // Clear HUD area
+  lastScore = score;
+  lastLevel = level;
+
   tft.fillRect(0, 0, 128, 26, 0x0010);
-
-  // Accent line 
   tft.drawLine(0, 25, 128, 25, HUD_ACCENT);
 
-  // ----- SCORE -----
   tft.setTextSize(1);
   tft.setTextColor(HUD_LABEL);
   tft.setCursor(4, 2);
@@ -526,20 +572,15 @@ void drawHUD() {
   tft.setCursor(4, 10);
   tft.print(score);
 
-  // ----- LEVEL -----
   tft.setTextSize(1);
-  tft.setTextColor(HUD_LABEL);
   tft.setCursor(90, 2);
   tft.print("LVL");
 
   tft.setTextSize(2);
-  tft.setTextColor(HUD_VALUE);
   tft.setCursor(90, 10);
-
-  if (level < 10) tft.print("0"); 
+  if (level < 10) tft.print("0");
   tft.print(level);
 }
-
 
 void resetGame() {
   lastFall = millis();
@@ -551,6 +592,10 @@ void resetGame() {
   gameOver = false;
   holdPiece = PIECE_NONE;
   holdUsed = false;
+  lastScore = -1;
+  lastLevel = -1;
+  lastNextPiece = -1;
+  lastHoldPiece = -1;
 
   for (int y = 0; y < BOARD_H; y++) {
     for (int x = 0; x < BOARD_W; x++) {
@@ -560,54 +605,66 @@ void resetGame() {
 
   tft.fillScreen(ST77XX_BLACK);
   drawBorder();
-  drawCyberGrid();   
+  drawCyberGrid();
   redrawBoard();
   nextPiece = random(1, 8);
   spawnPiece();
+  drawHUD();
+  drawNextPiece();
+  drawHoldPiece();
 }
 
-
 void drawGameOverScreen() {
-  tft.fillRect(0, 0, 128, 160, ST77XX_BLACK);
+  static bool screenDrawn = false;
+  
+  if (!screenDrawn) {
+    tft.fillRect(0, 0, 128, 160, ST77XX_BLACK);
 
-  tft.setTextColor(ST77XX_RED);
-  tft.setTextSize(2);
-  tft.setCursor(10, 40);
-  tft.print("GAME");
+    tft.setTextColor(ST77XX_RED);
+    tft.setTextSize(2);
+    tft.setCursor(10, 40);
+    tft.print("GAME");
 
-  tft.setCursor(10, 60);
-  tft.print("OVER");
+    tft.setCursor(10, 60);
+    tft.print("OVER");
 
-  tft.setTextSize(1);
-  tft.setTextColor(ST77XX_WHITE);
+    tft.setTextSize(1);
+    tft.setTextColor(ST77XX_WHITE);
 
-  tft.setCursor(10, 90);
-  tft.print("Score: ");
-  tft.print(score);
+    tft.setCursor(10, 90);
+    tft.print("Score: ");
+    tft.print(score);
 
-  tft.setCursor(10, 105);
-  tft.print("Level: ");
-  tft.print(level);
+    tft.setCursor(10, 105);
+    tft.print("Level: ");
+    tft.print(level);
 
-  tft.setCursor(10, 130);
-  tft.print("START = retry");
+    tft.setCursor(10, 130);
+    tft.print("START = retry");
+    
+    screenDrawn = true;
+  }
 }
 
 void drawNextPiece() {
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(PREVIEW_X - 2, PREVIEW_Y - 12);
+  tft.print("NEXT");
 
-  // Clear preview area
+  if (nextPiece == lastNextPiece) return;
+  lastNextPiece = nextPiece;
+
   tft.fillRect(PREVIEW_X - 2, PREVIEW_Y - 2,
                4 * CELL_SIZE + 4,
                4 * CELL_SIZE + 4,
                ST77XX_BLACK);
 
-  // Border
   tft.drawRect(PREVIEW_X - 2, PREVIEW_Y - 2,
                4 * CELL_SIZE + 4,
                4 * CELL_SIZE + 4,
                ST77XX_WHITE);
 
-  // Draw blocks
   for (int y = 0; y < 4; y++) {
     for (int x = 0; x < 4; x++) {
       if (tetrominoes[nextPiece - 1][y][x]) {
@@ -621,12 +678,6 @@ void drawNextPiece() {
       }
     }
   }
-
-  // Label
-  tft.setTextSize(1);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(PREVIEW_X - 2, PREVIEW_Y - 12);
-  tft.print("NEXT");
 }
 
 void flashRow(int row, uint16_t color) {
@@ -636,8 +687,7 @@ void flashRow(int row, uint16_t color) {
 }
 
 void holdCurrentPiece() {
-  if (holdUsed) return;  
-
+  if (holdUsed) return;
 
   if (holdPiece == PIECE_NONE) {
     holdPiece = currentPiece;
@@ -661,28 +711,26 @@ void holdCurrentPiece() {
 }
 
 void drawHoldPiece() {
-
-  // clear area
-  tft.fillRect(HOLD_X - 2, HOLD_Y - 2,
-               4 * CELL_SIZE + 4,
-               4 * CELL_SIZE + 4,
-               ST77XX_BLACK);
-
-  // border
-  tft.drawRect(HOLD_X - 2, HOLD_Y - 2,
-               4 * CELL_SIZE + 4,
-               4 * CELL_SIZE + 4,
-               ST77XX_WHITE);
-
-  // label
   tft.setCursor(HOLD_X, HOLD_Y - 12);
   tft.setTextSize(1);
   tft.setTextColor(ST77XX_WHITE);
   tft.print("HOLD");
 
+  if (holdPiece == lastHoldPiece) return;
+  lastHoldPiece = holdPiece;
+
+  tft.fillRect(HOLD_X - 2, HOLD_Y - 2,
+               4 * CELL_SIZE + 4,
+               4 * CELL_SIZE + 4,
+               ST77XX_BLACK);
+
+  tft.drawRect(HOLD_X - 2, HOLD_Y - 2,
+               4 * CELL_SIZE + 4,
+               4 * CELL_SIZE + 4,
+               ST77XX_WHITE);
+
   if (holdPiece == PIECE_NONE) return;
 
-  // draw held piece
   for (int y = 0; y < 4; y++) {
     for (int x = 0; x < 4; x++) {
       if (tetrominoes[holdPiece - 1][y][x]) {
@@ -729,8 +777,7 @@ int getGhostY() {
 void drawGhostPiece() {
   int ghostY = getGhostY();
 
-  // Don’t draw if piece is above board
-  if (ghostY < 0) return;
+  if (ghostY < 0 || ghostY == pieceY) return;
 
   for (int py = 0; py < 4; py++) {
     for (int px = 0; px < 4; px++) {
@@ -745,7 +792,6 @@ void drawGhostPiece() {
     }
   }
 }
-
 
 void drawBlockOutline(int x, int y, uint16_t color) {
   int px = BOARD_OFFSET_X + x * CELL_SIZE;
