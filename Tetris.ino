@@ -158,11 +158,19 @@ int lastLevel = -1;
 int lastNextPiece = -1;
 int lastHoldPiece = -1;
 
-// Debouncing variables
 bool btnLeftPressed = false;
 bool btnRightPressed = false;
 bool btnRotatePressed = false;
 bool btnStartPressed = false;
+
+enum GameState {
+  STATE_READY,
+  STATE_PLAYING,
+  STATE_GAMEOVER
+};
+
+GameState gameState = STATE_READY;
+
 
 void setup() {
   Serial.begin(115200);
@@ -192,21 +200,59 @@ void setup() {
   }
   
   randomSeed(analogRead(0));
-  nextPiece = random(1, 8);
-  spawnPiece();
   
   delay(1000);
   tft.fillRect(0, 0, 128, 26, ST77XX_BLACK);
   drawHUD();
   drawNextPiece();
   drawHoldPiece();
+  drawReadyScreen();
 }
 
 void loop() {
+  // ---------------- READY SCREEN ----------------
+  if (gameState == STATE_READY) {
+    bool startPressed = !digitalRead(BTN_START);
+
+    if (!startPressed) {
+      btnStartPressed = false;
+    }
+
+    if (startPressed && !btnStartPressed) {
+      btnStartPressed = true;
+
+      tft.fillScreen(ST77XX_BLACK);
+      drawBorder();
+      drawCyberGrid();
+
+      // Reset tracking variables to force redraw
+      lastScore = -1;
+      lastLevel = -1;
+      lastNextPiece = -1;
+      lastHoldPiece = -1;
+
+      nextPiece = random(1, 8);
+      spawnPiece();
+
+      // Draw all UI elements before starting
+      drawHUD();
+      drawNextPiece();
+      drawHoldPiece();
+      redrawBoard();
+
+      lastFall = millis();
+      lastMove = millis();
+      lastRotate = millis();
+
+      gameState = STATE_PLAYING;
+    }
+    return; // ⛔ stop everything else
+  }
+
   static bool needsRedraw = true;
 
   // ---------------- GAME OVER ----------------
-  if (gameOver) {
+  if (gameState == STATE_GAMEOVER) {
     drawGameOverScreen();
 
     bool startPressed = !digitalRead(BTN_START);
@@ -314,7 +360,7 @@ void loop() {
       needsRedraw = true;
 
       if (!canMove(0, 0)) {
-        gameOver = true;
+        gameState = STATE_GAMEOVER;
         return;
       }
     }
@@ -589,7 +635,6 @@ void resetGame() {
   score = 0;
   linesCleared = 0;
   level = 1;
-  gameOver = false;
   holdPiece = PIECE_NONE;
   holdUsed = false;
   lastScore = -1;
@@ -612,37 +657,103 @@ void resetGame() {
   drawHUD();
   drawNextPiece();
   drawHoldPiece();
+  gameState = STATE_PLAYING;
 }
 
 void drawGameOverScreen() {
   static bool screenDrawn = false;
   
   if (!screenDrawn) {
-    tft.fillRect(0, 0, 128, 160, ST77XX_BLACK);
+    tft.fillScreen(ST77XX_BLACK);
 
-    tft.setTextColor(ST77XX_RED);
+    // Animated border flash effect
+    for (int i = 0; i < 3; i++) {
+      tft.drawRect(5, 5, 118, 150, NEON_PINK);
+      delay(100);
+      tft.drawRect(5, 5, 118, 150, ST77XX_BLACK);
+      delay(100);
+    }
+    tft.drawRect(5, 5, 118, 150, NEON_CYAN);
+
+    // Title with shadow effect
+    tft.setTextColor(ST77XX_DARKGREY);
     tft.setTextSize(2);
-    tft.setCursor(10, 40);
+    tft.setCursor(21, 21);
     tft.print("GAME");
-
-    tft.setCursor(10, 60);
+    tft.setCursor(21, 41);
     tft.print("OVER");
 
+    tft.setTextColor(NEON_PINK);
+    tft.setCursor(20, 20);
+    tft.print("GAME");
+    tft.setCursor(20, 40);
+    tft.print("OVER");
+
+    // Decorative line
+    tft.drawLine(15, 62, 113, 62, NEON_CYAN);
+    tft.drawLine(15, 63, 113, 63, NEON_DARK);
+
+    // Stats section
     tft.setTextSize(1);
     tft.setTextColor(ST77XX_WHITE);
+    tft.setCursor(15, 72);
+    tft.print("FINAL STATS");
 
-    tft.setCursor(10, 90);
-    tft.print("Score: ");
+    // Score with label
+    tft.setTextColor(NEON_CYAN);
+    tft.setCursor(15, 88);
+    tft.print("Score:");
+    tft.setTextColor(ST77XX_WHITE);
+    tft.setTextSize(2);
+    tft.setCursor(20, 98);
     tft.print(score);
 
-    tft.setCursor(10, 105);
-    tft.print("Level: ");
+    // Level
+    tft.setTextSize(1);
+    tft.setTextColor(NEON_CYAN);
+    tft.setCursor(80, 88);
+    tft.print("Level:");
+    tft.setTextColor(ST77XX_WHITE);
+    tft.setTextSize(2);
+    tft.setCursor(85, 98);
     tft.print(level);
 
-    tft.setCursor(10, 130);
-    tft.print("START = retry");
+    // Lines cleared
+    tft.setTextSize(1);
+    tft.setTextColor(NEON_CYAN);
+    tft.setCursor(15, 118);
+    tft.print("Lines:");
+    tft.setTextColor(ST77XX_WHITE);
+    tft.setCursor(50, 118);
+    tft.print(linesCleared);
+
+    // Decorative line
+    tft.drawLine(15, 130, 113, 130, NEON_PINK);
+
+    // Instructions with blinking effect
+    tft.setTextColor(ST77XX_YELLOW);
+    tft.setCursor(18, 140);
+    tft.print("Press START");
     
     screenDrawn = true;
+  } else {
+    // Blinking prompt effect
+    static unsigned long lastBlink = 0;
+    static bool blinkState = false;
+    
+    if (millis() - lastBlink > 500) {
+      lastBlink = millis();
+      blinkState = !blinkState;
+      
+      if (blinkState) {
+        tft.setTextSize(1);
+        tft.setTextColor(ST77XX_YELLOW);
+        tft.setCursor(18, 140);
+        tft.print("Press START");
+      } else {
+        tft.fillRect(18, 140, 100, 8, ST77XX_BLACK);
+      }
+    }
   }
 }
 
@@ -817,4 +928,24 @@ void drawCyberGrid() {
       NEON_DARK
     );
   }
+}
+
+void drawReadyScreen() {
+  tft.fillRect(0, 0, 128, 160, ST77XX_BLACK);
+
+  drawBorder();
+  drawCyberGrid();
+
+  tft.setTextColor(NEON_CYAN);
+  tft.setTextSize(2);
+  tft.setCursor(18, 40);
+  tft.print("TETRIS");
+
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(20, 80);
+  tft.print("Press START");
+
+  tft.setCursor(20, 95);
+  tft.print("to play");
 }
