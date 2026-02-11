@@ -171,6 +171,9 @@ enum GameState {
 
 GameState gameState = STATE_READY;
 
+// Global flag to track if game over screen has been drawn
+bool gameOverScreenDrawn = false;
+
 
 void setup() {
   Serial.begin(115200);
@@ -360,6 +363,7 @@ void loop() {
       needsRedraw = true;
 
       if (!canMove(0, 0)) {
+        gameOverScreenDrawn = false;  // Reset flag when transitioning to game over
         gameState = STATE_GAMEOVER;
         return;
       }
@@ -641,6 +645,9 @@ void resetGame() {
   lastLevel = -1;
   lastNextPiece = -1;
   lastHoldPiece = -1;
+  
+  // Reset game over screen flag so it draws properly next time
+  gameOverScreenDrawn = false;
 
   for (int y = 0; y < BOARD_H; y++) {
     for (int x = 0; x < BOARD_W; x++) {
@@ -661,9 +668,7 @@ void resetGame() {
 }
 
 void drawGameOverScreen() {
-  static bool screenDrawn = false;
-  
-  if (!screenDrawn) {
+  if (!gameOverScreenDrawn) {
     tft.fillScreen(ST77XX_BLACK);
 
     // Animated border flash effect
@@ -735,7 +740,7 @@ void drawGameOverScreen() {
     tft.setCursor(18, 140);
     tft.print("Press START");
     
-    screenDrawn = true;
+    gameOverScreenDrawn = true;
   } else {
     // Blinking prompt effect
     static unsigned long lastBlink = 0;
